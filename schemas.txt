@@ -1,0 +1,93 @@
+-- Extensions
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Enums
+CREATE TYPE user_role AS ENUM ('user', 'admin');
+CREATE TYPE spot_status AS ENUM ('AVAILABLE', 'OCCUPIED', 'DISABLED');
+
+-- Users
+CREATE TABLE users (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name          TEXT NOT NULL,
+  email         TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role          user_role NOT NULL DEFAULT 'user',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Case-insensitive unique email
+CREATE UNIQUE INDEX ux_users_email_ci ON users (lower(email));
+
+-- Vehicles (each user can register multiple plates, but not duplicates)
+CREATE TABLE vehicles (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  plate      TEXT NOT NULL,
+  type       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ux_vehicles_user_plate ON vehicles (user_id, plate);
+
+-- Parking lots
+CREATE TABLE parking_lots (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ux_parking_lots_name ON parking_lots (name);
+
+-- Parking levels 
+CREATE TABLE parking_levels (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  lot_id     UUID NOT NULL REFERENCES parking_lots(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,     -- e.g., "Level 1", "Basement A"
+  sort_order INT  NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX ux_parking_levels_lot_name ON parking_levels (lot_id, name);
+
+-- Parking spots
+CREATE TABLE parking_spots (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  lot_id     UUID NOT NULL REFERENCES parking_lots(id) ON DELETE CASCADE,
+  level_id   UUID NOT NULL REFERENCES parking_levels(id) ON DELETE CASCADE,
+  number     TEXT NOT NULL,             -- human label like "S-101"
+  status     spot_status NOT NULL DEFAULT 'AVAILABLE',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A spot number is unique within the same level of a lot
+CREATE UNIQUE INDEX ux_parking_spots_lot_level_number
+  ON parking_spots (lot_id, level_id, number);
+
+-- Helpful filter/index for queries
+CREATE INDEX ix_parking_spots_lot_level_status
+  ON parking_spots (lot_id, level_id, status);
+
+-- Bookings
+CREATE TABLE bookings (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  vehicle_id  UUID NOT NULL REFERENCES vehicles(id) ON DELETE RESTRICT,
+  spot_id     UUID NOT NULL REFERENCES parking_spots(id) ON DELETE RESTRICT,
+  start_time  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  end_time    TIMESTAMPTZ NULL,
+  CONSTRAINT chk_booking_time_valid CHECK (end_time IS NULL OR end_time > start_time)
+);
+
+-- Only one ACTIVE booking per spot
+CREATE UNIQUE INDEX ux_bookings_active_per_spot
+  ON bookings (spot_id)
+  WHERE end_time IS NULL;
+
+-- Only one ACTIVE booking per vehicle
+CREATE UNIQUE INDEX ux_bookings_active_per_vehicle
+  ON bookings (vehicle_id)
+  WHERE end_time IS NULL;
+
+-- History queries (user timeline)
+CREATE INDEX ix_bookings_user_time
+  ON bookings (user_id, start_time DESC);
